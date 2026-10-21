@@ -21,20 +21,24 @@ orders, applies promo codes, stores orders, and generates invoices.
    pip install -r requirements.txt
    ```
 
-3. Point the app at a database:
+3. Load the demo data. This creates `orderly.db` in the current directory:
 
    ```sh
-   export DATABASE_URL=sqlite:///./orderly.db
+   python -m app.seed
    ```
 
-4. Start the server:
+   To use a different database file, set `ORDERLY_DB_PATH` before you seed and
+   run the app.
+
+4. Start the server from the repository root:
 
    ```sh
-   uvicorn main:app --reload
+   uvicorn app.main:app --reload
    ```
 
-5. Open http://localhost:8000/docs and try an endpoint. Authenticate with the
-   header `X-API-Token: demo-token`.
+5. Open http://localhost:8000/docs and try an endpoint. Authenticate with an
+   `X-API-Token` header that uses one of the demo tokens in `app/seed.py`, for
+   example `tok_ada_123`.
 
 ## Running tests
 
