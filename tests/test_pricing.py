@@ -57,7 +57,6 @@ def test_platinum_customer_gets_ten_percent_and_free_shipping(seeded_db):
     assert result["shipping"] == 0
 
 
-@pytest.mark.xfail(reason="Bug: order-size discount uses > 500 instead of >= 500", strict=True)
 def test_order_size_discount_starts_at_exactly_500(seeded_db):
     result = price(ADA, (GIZMO, 2))
     assert result["subtotal"] == 500.00
@@ -85,7 +84,6 @@ def test_percent_promo_applies_after_automatic_discounts(seeded_db):
     assert result["total"] == 173.66
 
 
-@pytest.mark.xfail(reason="Bug: free shipping checks the subtotal before discounts", strict=True)
 def test_free_shipping_uses_discounted_subtotal(seeded_db):
     result = price(ADA, (GADGET, 1), (CABLE, 3), promo="TENOFF")
     assert result["subtotal"] == 79.47

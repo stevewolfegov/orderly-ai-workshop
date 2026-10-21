@@ -1,130 +1,54 @@
-"""Pricing engine.
-
-Handles all the pricing stuff for orders.
-"""
+"""Order pricing. The business rules live in docs/PRICING_RULES.md."""
 from datetime import datetime
 
+from app import config
 from app.db import get_conn
 
+BULK_MIN_QUANTITY = 10
+BULK_DISCOUNT = 0.10
+TIER_DISCOUNTS = {"gold": 0.05, "platinum": 0.10}
+ORDER_SIZE_THRESHOLD = 500
+ORDER_SIZE_DISCOUNT = 0.05
+FREE_SHIPPING_THRESHOLD = 75
 
-def calculate_order_total(items, customer, promo_code=None, conn=None, dry_run=False):
-    # calculates the total
-    close = False
-    if conn is None:
+
+def tax_rate(state):
+    return config.TAX_RATES.get(state, config.DEFAULT_TAX_RATE)
+
+
+def calculate_order_total(items, customer, promo_code=None, conn=None):
+    owns_conn = conn is None
+    if owns_conn:
         conn = get_conn()
-        close = True
-
-    lines = []
-    subtotal = 0
-    errors = []
-    for it in items:
-        pid = it.get("product_id")
-        q = it.get("quantity", 1)
-        row = conn.execute("SELECT * FROM products WHERE id = ?", (pid,)).fetchone()
-        if row is None:
-            errors.append("Product %s not found" % pid)
-            continue
-        if not row["active"]:
-            errors.append("Product %s is not available" % pid)
-            continue
-        price = row["price"]
-        line_total = price * q
-        if q >= 10:
-            # bulk
-            line_total = line_total - line_total * 0.1
-        lines.append(
-            {
-                "product_id": pid,
-                "sku": row["sku"],
-                "quantity": q,
-                "unit_price": price,
-                "line_total": round(line_total, 2),
-            }
-        )
-        subtotal = subtotal + line_total
-
-    if errors:
-        if close:
+    try:
+        return _price_order(conn, items, customer or {}, promo_code)
+    finally:
+        if owns_conn:
             conn.close()
-        return {"ok": False, "errors": errors}
 
-    discount = 0
-    tier = customer.get("tier") if customer else "standard"
-    if tier == "gold":
-        discount = discount + subtotal * 0.05
-    elif tier == "platinum":
-        discount = discount + subtotal * 0.10
 
-    # platinum already gets 10% so they don't stack
-    if tier != "platinum":
-        if subtotal > 500:  # orders of $500 or more get 5% off
-            discount = discount + subtotal * 0.05
+def _price_order(conn, items, customer, promo_code):
+    lines, subtotal, errors = _price_lines(conn, items)
+    if errors:
+        return _failure(*errors)
 
-    free_ship = False
-    promo_applied = None
+    tier = customer.get("tier")
+    discount = _automatic_discount(subtotal, tier)
+
+    free_shipping = False
+    promo = None
     if promo_code:
-        p = conn.execute(
-            "SELECT * FROM promo_codes WHERE code = ?", (promo_code.upper(),)
-        ).fetchone()
-        if p is None:
-            if close:
-                conn.close()
-            return {"ok": False, "errors": ["Invalid promo code"]}
-        if not p["active"]:
-            if close:
-                conn.close()
-            return {"ok": False, "errors": ["Promo code is no longer active"]}
-        if p["expires"]:
-            if datetime.strptime(p["expires"], "%Y-%m-%d") < datetime.now():
-                if close:
-                    conn.close()
-                return {"ok": False, "errors": ["Promo code has expired"]}
-        if subtotal < p["min_subtotal"]:
-            if close:
-                conn.close()
-            return {
-                "ok": False,
-                "errors": ["Order does not meet the minimum for this promo code"],
-            }
-        if p["kind"] == "percent":
-            discount = discount + (subtotal - discount) * (p["value"] / 100.0)
-        elif p["kind"] == "fixed":
-            discount = discount + p["value"]
-            if discount > subtotal:
-                discount = subtotal
-        elif p["kind"] == "freeship":
-            free_ship = True
-        promo_applied = p["code"]
+        promo, error = _load_promo(conn, promo_code, subtotal)
+        if error:
+            return _failure(error)
+        discount, free_shipping = _apply_promo(promo, subtotal, discount)
 
     discounted = subtotal - discount
-
-    # shipping
-    if tier == "platinum":
-        shipping = 0
-    elif free_ship:
-        shipping = 0
-    elif subtotal >= 75:
-        shipping = 0
-    else:
-        shipping = 7.99
-
-    # tax
-    st = customer.get("state") if customer else None
-    if st == "CA":
-        rate = 0.0725
-    elif st == "NY":
-        rate = 0.04
-    elif st == "TX":
-        rate = 0.0625
-    elif st == "WA":
-        rate = 0.065
-    else:
-        rate = 0.05
-    tax = discounted * rate
-
+    shipping = _shipping_cost(tier, free_shipping, discounted)
+    tax = discounted * tax_rate(customer.get("state"))
     total = discounted + shipping + tax
 
-    result = {
+    return {
         "ok": True,
         "lines": lines,
         "subtotal": round(subtotal, 2),
@@ -132,8 +56,78 @@ def calculate_order_total(items, customer, promo_code=None, conn=None, dry_run=F
         "shipping": round(shipping, 2),
         "tax": round(tax, 2),
         "total": round(total, 2),
-        "promo_code": promo_applied,
+        "promo_code": promo["code"] if promo else None,
     }
-    if close:
-        conn.close()
-    return result
+
+
+def _failure(*errors):
+    return {"ok": False, "errors": list(errors)}
+
+
+def _price_lines(conn, items):
+    lines = []
+    errors = []
+    subtotal = 0
+    for item in items:
+        product_id = item.get("product_id")
+        quantity = item.get("quantity", 1)
+        product = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+        if product is None:
+            errors.append("Product %s not found" % product_id)
+            continue
+        if not product["active"]:
+            errors.append("Product %s is not available" % product_id)
+            continue
+        line_total = product["price"] * quantity
+        if quantity >= BULK_MIN_QUANTITY:
+            line_total -= line_total * BULK_DISCOUNT
+        lines.append(
+            {
+                "product_id": product_id,
+                "sku": product["sku"],
+                "quantity": quantity,
+                "unit_price": product["price"],
+                "line_total": round(line_total, 2),
+            }
+        )
+        subtotal += line_total
+    return lines, subtotal, errors
+
+
+def _automatic_discount(subtotal, tier):
+    discount = subtotal * TIER_DISCOUNTS.get(tier, 0)
+    # Platinum's tier discount replaces the order-size discount.
+    if tier != "platinum" and subtotal >= ORDER_SIZE_THRESHOLD:
+        discount += subtotal * ORDER_SIZE_DISCOUNT
+    return discount
+
+
+def _load_promo(conn, code, subtotal):
+    promo = conn.execute(
+        "SELECT * FROM promo_codes WHERE code = ?", (code.upper(),)
+    ).fetchone()
+    if promo is None:
+        return None, "Invalid promo code"
+    if not promo["active"]:
+        return None, "Promo code is no longer active"
+    if promo["expires"] and datetime.strptime(promo["expires"], "%Y-%m-%d") < datetime.now():
+        return None, "Promo code has expired"
+    if subtotal < promo["min_subtotal"]:
+        return None, "Order does not meet the minimum for this promo code"
+    return promo, None
+
+
+def _apply_promo(promo, subtotal, discount):
+    if promo["kind"] == "percent":
+        return discount + (subtotal - discount) * (promo["value"] / 100.0), False
+    if promo["kind"] == "fixed":
+        return min(discount + promo["value"], subtotal), False
+    if promo["kind"] == "freeship":
+        return discount, True
+    return discount, False
+
+
+def _shipping_cost(tier, free_shipping, discounted):
+    if tier == "platinum" or free_shipping or discounted >= FREE_SHIPPING_THRESHOLD:
+        return 0
+    return config.FLAT_SHIPPING

@@ -1,4 +1,3 @@
-from app import config
 from app.db import get_conn
 from app.pricing import calculate_order_total
 
@@ -62,8 +61,3 @@ def list_orders(customer_id):
     conn.close()
     return [dict(r) for r in rows]
 
-
-def estimate_tax(amount, state):
-    # used by the quote endpoint for a rough number before checkout
-    rate = config.TAX_RATES.get(state, config.DEFAULT_TAX_RATE)
-    return round(amount * rate, 2)

@@ -5,12 +5,6 @@ from app.db import get_conn
 from app.orders import get_order
 
 
-def _tax_for_state(amount, state):
-    # local copy so invoices don't depend on the pricing module
-    rates = {"CA": 0.0725, "NY": 0.045, "TX": 0.0625, "WA": 0.065}
-    return round(amount * rates.get(state, 0.05), 2)
-
-
 def generate_invoice(order_id):
     order = get_order(order_id)
     if order is None:
@@ -21,9 +15,9 @@ def generate_invoice(order_id):
     ).fetchone()
     conn.close()
 
-    taxable = order["subtotal"] - order["discount"]
-    tax = _tax_for_state(taxable, customer["state"])
-    total = round(taxable + order["shipping"] + tax, 2)
+    # Invoices show what was charged and never recalculate (PRICING_RULES.md).
+    tax = order["tax"]
+    total = order["total"]
 
     out = []
     out.append("ORDERLY INC. - INVOICE")

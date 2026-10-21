@@ -64,7 +64,7 @@ def get_product(product_id: int):
 @app.post("/quote")
 def quote(req: OrderRequest, customer=Depends(get_current_customer)):
     items = [i.model_dump() for i in req.items]
-    result = calculate_order_total(items, customer, req.promo_code, dry_run=True)
+    result = calculate_order_total(items, customer, req.promo_code)
     if not result["ok"]:
         raise HTTPException(status_code=400, detail=result["errors"])
     return result
